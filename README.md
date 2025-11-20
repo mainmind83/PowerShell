@@ -1,2 +1,2 @@
 # PowerShell
-Scripts y automatizaciones
+Scripts y automatizaciones para frikis de IT
