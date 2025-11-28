@@ -112,9 +112,11 @@ try {
     # Resultado limpio
     if ($unexpected.Count -eq 0) {
         Write-Output "OK"
+        exit 0         # <--- SIN INCIDENTE
     }
     else {
         Write-Output ("ALERTA: " + ($unexpected -join '; '))
+        exit 1         # <--- INCIDENTE
     }
 }
 catch {
