@@ -1,0 +1,122 @@
+<#
+Este script está disponible bajo la licencia MIT.
+Copyright (c) 2025 Kaizen Development Solutions.
+
+Se permite el uso, copia, modificación y distribución del software
+siempre que se mantenga este aviso de copyright y la referencia a la
+licencia MIT. El software se proporciona "tal cual", sin garantías de
+ningún tipo. Para más detalles consulte el archivo LICENSE del
+repositorio.
+
+.SYNOPSIS
+Audita los miembros del grupo de Administradores locales en Windows,
+independientemente del idioma del sistema y de si el equipo está o no 
+unido a un dominio. Devuelve "OK" si solo existen los miembros permitidos
+(o habituales), o "ALERTA: ..." con los usuarios inesperados.
+
+.EXAMPLE
+.\AdminLocalReport.ps1
+
+Se utiliza normalmente desde RMM como Script-Based Custom Field.
+
+.EXAMPLE
+.\AdminLocalReport.ps1
+
+Devuelve:
+OK
+o
+ALERTA: dominio\usuario1; equipo\usuario2
+#>
+
+# Hacer que los errores cuenten como "terminating" para que el try/catch funcione
+$ErrorActionPreference = 'Stop'
+
+try {
+    # SID del grupo Administradores locales (independiente del idioma)
+    $adminSid = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-32-544")
+    $adminAccount = $adminSid.Translate([System.Security.Principal.NTAccount])
+
+    # Ejemplo: BUILTIN\Administradores -> nos quedamos solo con "Administradores"
+    $adminGroupFull = $adminAccount.Value
+    $adminGroupName = $adminGroupFull.Split('\')[-1]
+
+    # Miembros reales del grupo Administradores (usando SOLO el nombre)
+    $members = Get-LocalGroupMember -Group $adminGroupName -ErrorAction Stop |
+               Select-Object -ExpandProperty Name
+
+    # --- Detectar dominio si existe ---
+    $domain = (Get-WmiObject Win32_ComputerSystem).Domain
+    $isDomainJoined = $domain -and ($domain -ne $env:COMPUTERNAME)
+
+    # --- WHITELIST base (coincidencias exactas) ---
+    $allowed = @(
+        "builtin\administrators",
+        "builtin\administradores",
+        "administrators",
+        "administradores",
+        "nt authority\system",
+        "nt authority\local service",
+        "nt authority\network service",
+        "$($env:COMPUTERNAME)\administrator",
+        "$($env:COMPUTERNAME)\administrador",
+        "usuario",                         # usuario genérico
+        "$($env:COMPUTERNAME)\usuario"     # usuario local con prefijo del equipo
+    )
+
+    # Pasamos todo a minúsculas
+    $allowedLower = $allowed | ForEach-Object { $_.ToLower() }
+
+    # --- Función auxiliar para saber si un miembro es permitido ---
+    function Test-IsAllowedMember {
+        param(
+            [string]$MemberNameLower
+        )
+
+        # 1. Coincidencia exacta
+        if ($MemberNameLower -in $allowedLower) {
+            return $true
+        }
+
+        # 2. Domain Admins (cualquier dominio, NetBIOS o FQDN)
+        if ($MemberNameLower -like "*\domain admins") {
+            return $true
+        }
+
+        # 3. Variantes "Administradores del dominio"
+        if ($MemberNameLower -like "*\administradores del dominio") {
+            return $true
+        }
+        if ($MemberNameLower -like "*\admins. del dominio") {
+            return $true
+        }
+
+        # 4. Usuario "usuario" con cualquier prefijo (equipo o dominio)
+        if ($MemberNameLower -like "*\usuario" -and "usuario" -in $allowedLower) {
+            return $true
+        }
+
+        return $false
+    }
+
+    # Detectar usuarios no permitidos
+    $unexpected = @()
+    foreach ($m in $members) {
+        if (-not [string]::IsNullOrWhiteSpace($m)) {
+            $ml = $m.ToLower()
+            if (-not (Test-IsAllowedMember -MemberNameLower $ml)) {
+                $unexpected += $m
+            }
+        }
+    }
+
+    # Resultado limpio
+    if ($unexpected.Count -eq 0) {
+        Write-Output "OK"
+    }
+    else {
+        Write-Output ("ALERTA: " + ($unexpected -join '; '))
+    }
+}
+catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
+}
