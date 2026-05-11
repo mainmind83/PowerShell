@@ -1,0 +1,459 @@
+
+# =========================================================================================================================
+Write-Host ""
+Write-Host "  ##################################################################" -ForegroundColor Red
+Write-Host "  ##                                                              ##" -ForegroundColor Red
+Write-Host "     ███    ████████ ████████ ██    ██  ██████  ████  ███████  ██    ██ " -ForegroundColor Red
+Write-Host "    ██ ██      ██    ██       ███   ██ ██    ██  ██  ██     ██ ███   ██ " -ForegroundColor Red
+Write-Host "   ██   ██     ██    ██       ████  ██ ██        ██  ██     ██ ████  ██ " -ForegroundColor Red
+Write-Host "  ██     ██    ██    ██████   ██ ██ ██ ██        ██  ██     ██ ██ ██ ██ " -ForegroundColor Red
+Write-Host "  █████████    ██    ██       ██  ████ ██        ██  ██     ██ ██  ████ " -ForegroundColor Red
+Write-Host "  ██     ██    ██    ██       ██   ███ ██    ██  ██  ██     ██ ██   ███ " -ForegroundColor Red
+Write-Host "  ██     ██    ██    ████████ ██    ██  ██████  ████  ███████  ██    ██ " -ForegroundColor Red
+Write-Host "  ##                                                              ##" -ForegroundColor Red
+Write-Host "  ##   Este script elimina PERMANENTE e IRREVERSIBLEMENTE         ##" -ForegroundColor Yellow
+Write-Host "  ##   todos los datos del vault seleccionado.                    ##" -ForegroundColor Yellow
+Write-Host "  ##                                                              ##" -ForegroundColor Red
+Write-Host "  ##        >>> ASEGURATE de que sabes lo que haces <<<          ##" -ForegroundColor White
+Write-Host "  ##                                                              ##" -ForegroundColor Red
+Write-Host "  ##################################################################" -ForegroundColor Red
+Write-Host ""
+# =========================================================================================================================
+
+# =============================================================================
+#  Delete-BackupCLAM.ps1
+#  Autor  : Kaizen Development Solutions
+#  Version: 2.0
+# =============================================================================
+#
+#  DESCRIPCION
+#  -----------
+#  Elimina un Recovery Services Vault de Azure y todos sus elementos asociados
+#  (backups de VM, SQL, SAP HANA, Azure Files, servidores MARS/MABS/DPM, ASR,
+#  private endpoints). Completamente interactivo: no requiere editar el script.
+#
+#  REQUISITOS
+#  ----------
+#  - PowerShell 7 o superior
+#      https://go.microsoft.com/fwlink/?linkid=2181071
+#  - Modulos Az.RecoveryServices >= 5.3.0 y Az.Network >= 4.15.0
+#      (el script los instala/actualiza automaticamente si es necesario)
+#  - Cuenta Azure con permisos de Contributor o superior sobre el vault
+#
+#  USO
+#  ---
+#  1. Abre PowerShell 7 y navega a la carpeta donde esta el script
+#  2. Ejecuta:  .\Delete-BackupCLAM.ps1
+#  3. Sigue los pasos en pantalla:
+#       a) Autenticate via navegador con el codigo que aparece en consola
+#       b) Elige el tenant de la lista
+#       c) Elige la suscripcion de la lista
+#       d) Elige el vault a eliminar
+#       e) Confirma escribiendo SI
+#
+#  NOTAS
+#  -----
+#  - Tenants con MFA o acceso condicional pediran un segundo login al
+#    seleccionarlos. Es el comportamiento esperado.
+#  - Los servidores MARS, MAB y DPM deben desregistrarse tambien desde
+#    sus consolas locales: https://go.microsoft.com/fwlink/?linkid=2186234
+#  - Azure Site Recovery: este script elimina solo la configuracion en Azure,
+#    no en el origen: https://go.microsoft.com/fwlink/?linkid=2182781
+#
+# =============================================================================
+
+# --- Verificacion de modulos --------------------------------------------------
+Write-Host "Verificando modulos Az..." -ForegroundColor Cyan
+$RSmodule = Get-Module -Name Az.RecoveryServices -ListAvailable
+$NWmodule = Get-Module -Name Az.Network -ListAvailable
+
+if (-not $RSmodule -or $RSmodule.Version -lt "5.3.0") {
+    Write-Host "Actualizando Az.RecoveryServices..." -ForegroundColor Yellow
+    Uninstall-Module -Name Az.RecoveryServices -ErrorAction SilentlyContinue
+    Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process -Force
+    Install-Module -Name Az.RecoveryServices -Repository PSGallery -Force -AllowClobber
+}
+if (-not $NWmodule -or $NWmodule.Version -lt "4.15.0") {
+    Write-Host "Actualizando Az.Network..." -ForegroundColor Yellow
+    Uninstall-Module -Name Az.Network -ErrorAction SilentlyContinue
+    Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process -Force
+    Install-Module -Name Az.Network -Repository PSGallery -Force -AllowClobber
+}
+
+# --- Funcion auxiliar: obtener token como texto plano ------------------------
+function Get-AzTokenString {
+    param(
+        [string]$TenantId,
+        [string]$ResourceUrl = "https://management.azure.com/"
+    )
+    $tokenObj = Get-AzAccessToken -TenantId $TenantId -ResourceUrl $ResourceUrl
+    $token = $tokenObj.Token
+    if ($token -is [System.Security.SecureString]) {
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($token)
+        )
+    }
+    return $token
+}
+
+# --- Autenticacion inicial (sin tenant) --------------------------------------
+Write-Host "`nWARNING: Asegurate de tener PowerShell 7+. https://go.microsoft.com/fwlink/?linkid=2181071" -ForegroundColor Yellow
+Update-AzConfig -EnableLoginByWam $false | Out-Null
+Update-AzConfig -LoginExperienceV2 Off | Out-Null
+Disable-AzContextAutosave -Scope Process | Out-Null
+$null = Connect-AzAccount -Scope Process -UseDeviceAuthentication -SkipContextPopulation
+
+# --- Seleccion de tenant -----------------------------------------------------
+Write-Host "`nCargando tenants disponibles..." -ForegroundColor Cyan
+$tenants = @(Get-AzTenant -ErrorAction SilentlyContinue)
+
+if ($tenants.Count -eq 0) {
+    Write-Error "No se encontraron tenants para esta cuenta."
+    exit 1
+}
+
+Write-Host "`nTenants disponibles:" -ForegroundColor Cyan
+for ($i = 0; $i -lt $tenants.Count; $i++) {
+    $tName   = if ($tenants[$i].Name)          { $tenants[$i].Name }          else { "Nombre no disponible" }
+    $tDomain = if ($tenants[$i].DefaultDomain) { $tenants[$i].DefaultDomain } else { "Dominio no disponible" }
+    Write-Host "  [$($i+1)] $tName  |  $tDomain  |  ID: $($tenants[$i].Id)"
+}
+
+do {
+    $tenantInput = Read-Host "`nElige el numero de tenant"
+    $tenantIndex = [int]$tenantInput - 1
+} while ($tenantIndex -lt 0 -or $tenantIndex -ge $tenants.Count)
+
+$selectedTenant = $tenants[$tenantIndex]
+$TenantId       = $selectedTenant.Id
+
+# Reconectar al tenant seleccionado (necesario para MFA/Conditional Access)
+Write-Host "Conectando al tenant '$($selectedTenant.DefaultDomain)'..." -ForegroundColor Cyan
+$null = Connect-AzAccount -TenantId $TenantId -Scope Process -UseDeviceAuthentication -SkipContextPopulation
+
+# --- Seleccion de suscripcion ------------------------------------------------
+Write-Host "`nCargando suscripciones del tenant..." -ForegroundColor Cyan
+$subscriptions = @(Get-AzSubscription -TenantId $TenantId -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Enabled" })
+
+if ($subscriptions.Count -eq 0) {
+    Write-Error "No se encontraron suscripciones activas en este tenant."
+    exit 1
+}
+
+Write-Host "`nSuscripciones disponibles:" -ForegroundColor Cyan
+for ($i = 0; $i -lt $subscriptions.Count; $i++) {
+    Write-Host "  [$($i+1)] $($subscriptions[$i].Name)  |  ID: $($subscriptions[$i].Id)"
+}
+
+do {
+    $subInput = Read-Host "`nElige el numero de suscripcion"
+    $subIndex = [int]$subInput - 1
+} while ($subIndex -lt 0 -or $subIndex -ge $subscriptions.Count)
+
+$selectedSub    = $subscriptions[$subIndex]
+$SubscriptionId = $selectedSub.Id
+
+$context = Set-AzContext -SubscriptionId $SubscriptionId -TenantId $TenantId
+if ($null -eq $context) {
+    Write-Error "No se pudo establecer el contexto. Verifica permisos."
+    exit 1
+}
+Write-Host "Contexto: '$($selectedSub.Name)' / Tenant: '$($selectedTenant.DefaultDomain)'" -ForegroundColor Green
+
+# --- Seleccion de vault ------------------------------------------------------
+Write-Host "`nCargando Recovery Services Vaults..." -ForegroundColor Cyan
+$vaults = @(Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue)
+
+if ($vaults.Count -eq 0) {
+    Write-Error "No se encontraron Recovery Services Vaults en esta suscripcion."
+    exit 1
+}
+
+Write-Host "`nVaults disponibles:" -ForegroundColor Cyan
+for ($i = 0; $i -lt $vaults.Count; $i++) {
+    Write-Host "  [$($i+1)] $($vaults[$i].Name)  |  Resource Group: $($vaults[$i].ResourceGroupName)  |  Region: $($vaults[$i].Location)"
+}
+
+do {
+    $vaultInput = Read-Host "`nElige el numero del vault a eliminar"
+    $vaultIndex = [int]$vaultInput - 1
+} while ($vaultIndex -lt 0 -or $vaultIndex -ge $vaults.Count)
+
+$VaultToDelete = $vaults[$vaultIndex]
+$VaultName     = $VaultToDelete.Name
+$ResourceGroup = $VaultToDelete.ResourceGroupName
+
+# --- Confirmacion final ------------------------------------------------------
+Write-Host "`n==================================================" -ForegroundColor Red
+Write-Host "  ATENCION: OPERACION DESTRUCTIVA E IRREVERSIBLE" -ForegroundColor Red
+Write-Host "==================================================" -ForegroundColor Red
+Write-Host "  Tenant      : $($selectedTenant.Name) ($($selectedTenant.DefaultDomain))" -ForegroundColor Yellow
+Write-Host "  Tenant ID   : $TenantId" -ForegroundColor Yellow
+Write-Host "  Suscripcion : $($selectedSub.Name)" -ForegroundColor Yellow
+Write-Host "  Sub ID      : $SubscriptionId" -ForegroundColor Yellow
+Write-Host "  Vault       : $VaultName" -ForegroundColor Yellow
+Write-Host "  Grupo       : $ResourceGroup" -ForegroundColor Yellow
+Write-Host "==================================================" -ForegroundColor Red
+$confirm = Read-Host "`nEscribe 'SI' para confirmar y continuar, cualquier otra cosa cancela"
+if ($confirm -ne "SI") {
+    Write-Host "Operacion cancelada." -ForegroundColor Green
+    exit 0
+}
+
+# --- Establecer contexto de vault para ASR -----------------------------------
+$asrContextSet = $false
+try {
+    Set-AzRecoveryServicesAsrVaultContext -Vault $VaultToDelete -ErrorAction Stop
+    $asrContextSet = $true
+} catch {
+    Write-Host "Info: vault sin configuracion ASR (normal si no se usa Site Recovery)." -ForegroundColor DarkGray
+}
+
+# --- Obtener todos los items y servidores ------------------------------------
+$backupItemsVM      = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureVM -WorkloadType AzureVM -VaultId $VaultToDelete.ID
+$backupItemsSQL     = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureWorkload -WorkloadType MSSQL -VaultId $VaultToDelete.ID
+$backupItemsAFS     = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureStorage -WorkloadType AzureFiles -VaultId $VaultToDelete.ID
+$backupItemsSAP     = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureWorkload -WorkloadType SAPHanaDatabase -VaultId $VaultToDelete.ID
+$backupContainersSQL   = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVMAppContainer -VaultId $VaultToDelete.ID | Where-Object {$_.ExtendedInfo.WorkloadType -eq "SQL"}
+$protectableItemsSQL   = Get-AzRecoveryServicesBackupProtectableItem -WorkloadType MSSQL -VaultId $VaultToDelete.ID | Where-Object {$_.IsAutoProtected -eq $true}
+$backupContainersSAP   = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVMAppContainer -VaultId $VaultToDelete.ID | Where-Object {$_.ExtendedInfo.WorkloadType -eq "SAPHana"}
+$StorageAccounts       = Get-AzRecoveryServicesBackupContainer -ContainerType AzureStorage -VaultId $VaultToDelete.ID
+$backupServersMARS     = Get-AzRecoveryServicesBackupContainer -ContainerType "Windows" -BackupManagementType MAB -VaultId $VaultToDelete.ID
+$backupServersMABS     = Get-AzRecoveryServicesBackupManagementServer -VaultId $VaultToDelete.ID | Where-Object { $_.BackupManagementType -eq "AzureBackupServer" }
+$backupServersDPM      = Get-AzRecoveryServicesBackupManagementServer -VaultId $VaultToDelete.ID | Where-Object { $_.BackupManagementType -eq "SCDPM" }
+$pvtendpoints          = Get-AzPrivateEndpointConnection -PrivateLinkResourceId $VaultToDelete.ID
+
+# --- Eliminar items de backup ------------------------------------------------
+foreach($item in $backupItemsVM)  { Disable-AzRecoveryServicesBackupProtection -Item $item -VaultId $VaultToDelete.ID -RemoveRecoveryPoints -Force }
+Write-Host "Disabled and soft deleted Azure VM backup items"
+
+foreach($item in $backupItemsSQL) { Disable-AzRecoveryServicesBackupProtection -Item $item -VaultId $VaultToDelete.ID -RemoveRecoveryPoints -Force }
+Write-Host "Disabled and soft deleted SQL Server backup items"
+
+foreach($item in $protectableItemsSQL) { Disable-AzRecoveryServicesBackupAutoProtection -BackupManagementType AzureWorkload -WorkloadType MSSQL -InputItem $item -VaultId $VaultToDelete.ID }
+Write-Host "Disabled auto-protection for SQL protectable items"
+
+foreach($item in $backupContainersSQL) { Unregister-AzRecoveryServicesBackupContainer -Container $item -Force -VaultId $VaultToDelete.ID }
+Write-Host "Unregistered SQL Servers in Azure VM containers"
+
+foreach($item in $backupItemsSAP)  { Disable-AzRecoveryServicesBackupProtection -Item $item -VaultId $VaultToDelete.ID -RemoveRecoveryPoints -Force }
+Write-Host "Disabled and soft deleted SAP HANA backup items"
+
+foreach($item in $backupContainersSAP) { Unregister-AzRecoveryServicesBackupContainer -Container $item -Force -VaultId $VaultToDelete.ID }
+Write-Host "Unregistered SAP HANA containers"
+
+foreach($item in $backupItemsAFS)  { Disable-AzRecoveryServicesBackupProtection -Item $item -VaultId $VaultToDelete.ID -RemoveRecoveryPoints -Force }
+Write-Host "Disabled and soft deleted Azure File Share backups"
+
+foreach($item in $StorageAccounts) { Unregister-AzRecoveryServicesBackupContainer -container $item -Force -VaultId $VaultToDelete.ID }
+Write-Host "Unregistered Storage Accounts"
+
+foreach($item in $backupServersMARS) { Unregister-AzRecoveryServicesBackupContainer -Container $item -Force -VaultId $VaultToDelete.ID }
+Write-Host "Unregistered MARS Servers"
+
+# === LIMPIEZA MAB/MABS ======================================================
+
+# Paso 1: Desactivar Soft Delete y Enhanced Security via REST API
+Write-Host "Desactivando Soft Delete y Enhanced Security..." -ForegroundColor Cyan
+$secHeader = @{ 'Content-Type' = 'application/json'; 'Authorization' = 'Bearer ' + (Get-AzTokenString -TenantId $TenantId) }
+$secUri    = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.RecoveryServices/vaults/$VaultName/backupconfig/vaultconfig?api-version=2021-01-01"
+$secBody   = '{"properties":{"enhancedSecurityState":"Disabled","softDeleteFeatureState":"Disabled"}}'
+try {
+    Invoke-RestMethod -Uri $secUri -Headers $secHeader -Method PATCH -Body $secBody -ErrorAction Stop
+    Write-Host "Soft Delete y Enhanced Security desactivados." -ForegroundColor Green
+} catch {
+    if ($_ -match "AuthorizationFailed") {
+        Write-Host "ERROR DE PERMISOS: la cuenta no tiene 'Backup Contributor' o 'Contributor' sobre el vault." -ForegroundColor Red
+        Write-Host "         Asigna ese rol en Azure Portal -> vault -> Access Control (IAM) y vuelve a ejecutar." -ForegroundColor Red
+    } else {
+        Write-Host "Advertencia al desactivar seguridad: $_" -ForegroundColor Yellow
+    }
+}
+Start-Sleep -Seconds 10
+
+# Paso 2: Restaurar items MAB en soft-delete y borrarlos definitivamente
+$mabAllItems = @()
+foreach ($wt in @("FileFolder", "AzureFiles", "MSSQL", "SAPHanaDatabase", "AzureVM")) {
+    $items = Get-AzRecoveryServicesBackupItem -BackupManagementType MAB -WorkloadType $wt -VaultId $VaultToDelete.ID -ErrorAction SilentlyContinue
+    if ($items) { $mabAllItems += $items }
+}
+Write-Host "Items MAB encontrados: $($mabAllItems.Count)" -ForegroundColor Cyan
+foreach ($mabItem in $mabAllItems) {
+    if ($mabItem.DeleteState -eq "ToBeDeleted") {
+        Write-Host "  Restaurando de soft-delete: $($mabItem.Name)" -ForegroundColor Yellow
+        Undo-AzRecoveryServicesBackupItemDeletion -Item $mabItem -VaultId $VaultToDelete.ID -Force -ErrorAction SilentlyContinue
+    }
+}
+$mabAllItemsFresh = @()
+foreach ($wt in @("FileFolder", "AzureFiles", "MSSQL", "SAPHanaDatabase", "AzureVM")) {
+    $items = Get-AzRecoveryServicesBackupItem -BackupManagementType MAB -WorkloadType $wt -VaultId $VaultToDelete.ID -ErrorAction SilentlyContinue
+    if ($items) { $mabAllItemsFresh += $items }
+}
+foreach ($mabItem in $mabAllItemsFresh) {
+    Write-Host "  Eliminando item MAB: $($mabItem.Name)" -ForegroundColor Cyan
+    Disable-AzRecoveryServicesBackupProtection -Item $mabItem -VaultId $VaultToDelete.ID -RemoveRecoveryPoints -Force -ErrorAction SilentlyContinue
+}
+
+# Paso 3: Dar de baja contenedores MAB
+$mabContainersRefresh = Get-AzRecoveryServicesBackupContainer -ContainerType "Windows" -BackupManagementType MAB -VaultId $VaultToDelete.ID -ErrorAction SilentlyContinue
+foreach ($container in $mabContainersRefresh) {
+    Write-Host "  Dando de baja contenedor MAB: $($container.FriendlyName)" -ForegroundColor Cyan
+    Unregister-AzRecoveryServicesBackupContainer -Container $container -Force -VaultId $VaultToDelete.ID -ErrorAction SilentlyContinue
+}
+
+# Paso 4: Dar de baja MAB/MABS servers (PowerShell + REST API como fallback)
+foreach($item in $backupServersMABS) {
+    Write-Host "  Dando de baja MAB Server: $($item.Name)" -ForegroundColor Cyan
+    try {
+        Unregister-AzRecoveryServicesBackupManagementServer -AzureRmBackupManagementServer $item -VaultId $VaultToDelete.ID -ErrorAction Stop
+        Write-Host "  MAB Server '$($item.Name)' dado de baja." -ForegroundColor Green
+    } catch {
+        Write-Host "  PowerShell fallo, intentando REST API..." -ForegroundColor Yellow
+        $mabHeader = @{ 'Authorization' = 'Bearer ' + (Get-AzTokenString -TenantId $TenantId) }
+        $mabUri    = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.RecoveryServices/vaults/$VaultName/registeredIdentities/$($item.Name)?api-version=2016-06-01"
+        try {
+            Invoke-RestMethod -Uri $mabUri -Headers $mabHeader -Method DELETE -ErrorAction Stop
+            Write-Host "  MAB Server '$($item.Name)' dado de baja via REST API." -ForegroundColor Green
+        } catch {
+            if ($_ -match "AuthorizationFailed") {
+                Write-Host "  ERROR DE PERMISOS al dar de baja '$($item.Name)'." -ForegroundColor Red
+                Write-Host "  La cuenta necesita rol 'Contributor' o 'Backup Contributor' sobre el vault." -ForegroundColor Red
+            } else {
+                Write-Host "  ERROR dando de baja '$($item.Name)': $_" -ForegroundColor Red
+            }
+        }
+    }
+}
+Write-Host "MAB/MABS Servers procesados"
+
+foreach($item in $backupServersDPM) {
+    Unregister-AzRecoveryServicesBackupManagementServer -AzureRmBackupManagementServer $item -VaultId $VaultToDelete.ID
+}
+Write-Host "DPM Servers procesados"
+Write-Host "AVISO: Verifica MARS/MAB/DPM consoles manualmente. https://go.microsoft.com/fwlink/?linkid=2186234" -ForegroundColor Yellow
+
+# --- Eliminar items ASR ------------------------------------------------------
+if ($asrContextSet) {
+$fabricObjects = Get-AzRecoveryServicesAsrFabric
+if ($null -ne $fabricObjects) {
+    foreach ($fabricObject in $fabricObjects) {
+        $containerObjects = Get-AzRecoveryServicesAsrProtectionContainer -Fabric $fabricObject
+        foreach ($containerObject in $containerObjects) {
+            $protectedItems = Get-AzRecoveryServicesAsrReplicationProtectedItem -ProtectionContainer $containerObject
+            foreach ($protectedItem in $protectedItems) {
+                Write-Host "Eliminando item ASR: $($protectedItem.Name)"
+                Remove-AzRecoveryServicesAsrReplicationProtectedItem -InputObject $protectedItem -Force
+            }
+            $containerMappings = Get-AzRecoveryServicesAsrProtectionContainerMapping -ProtectionContainer $containerObject
+            foreach ($containerMapping in $containerMappings) {
+                Remove-AzRecoveryServicesAsrProtectionContainerMapping -ProtectionContainerMapping $containerMapping -Force
+            }
+        }
+        $NetworkObjects = Get-AzRecoveryServicesAsrNetwork -Fabric $fabricObject
+        foreach ($networkObject in $NetworkObjects) {
+            $PrimaryNetwork  = Get-AzRecoveryServicesAsrNetwork -Fabric $fabricObject -FriendlyName $networkObject
+            $NetworkMappings = Get-AzRecoveryServicesAsrNetworkMapping -Network $PrimaryNetwork
+            foreach ($networkMappingObject in $NetworkMappings) {
+                $NetworkMapping = Get-AzRecoveryServicesAsrNetworkMapping -Name $networkMappingObject.Name -Network $PrimaryNetwork
+                Remove-AzRecoveryServicesAsrNetworkMapping -InputObject $NetworkMapping
+            }
+        }
+        Write-Host "Eliminando Fabric ASR: $($fabricObject.FriendlyName)"
+        Remove-AzRecoveryServicesAsrFabric -InputObject $fabricObject -Force
+    }
+}
+Write-Host "AVISO: Limpia el origen ASR manualmente. https://go.microsoft.com/fwlink/?linkid=2182781" -ForegroundColor Yellow
+} # fin if ($asrContextSet)
+
+# --- Eliminar Private Endpoints ----------------------------------------------
+foreach($item in $pvtendpoints) {
+    $pename = $item.Name.Split(".")[0]
+    Remove-AzPrivateEndpointConnection -ResourceId $item.Id -Force
+    Remove-AzPrivateEndpoint -Name $pename -ResourceGroupName $ResourceGroup -Force
+}
+Write-Host "Private Endpoints eliminados"
+
+# --- Recheck: elementos que podrian bloquear el borrado ----------------------
+$backupItemsVMFin      = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureVM -WorkloadType AzureVM -VaultId $VaultToDelete.ID
+$backupItemsSQLFin     = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureWorkload -WorkloadType MSSQL -VaultId $VaultToDelete.ID
+$backupContainersSQLFin   = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVMAppContainer -VaultId $VaultToDelete.ID | Where-Object {$_.ExtendedInfo.WorkloadType -eq "SQL"}
+$protectableItemsSQLFin   = Get-AzRecoveryServicesBackupProtectableItem -WorkloadType MSSQL -VaultId $VaultToDelete.ID | Where-Object {$_.IsAutoProtected -eq $true}
+$backupItemsSAPFin     = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureWorkload -WorkloadType SAPHanaDatabase -VaultId $VaultToDelete.ID
+$backupContainersSAPFin   = Get-AzRecoveryServicesBackupContainer -ContainerType AzureVMAppContainer -VaultId $VaultToDelete.ID | Where-Object {$_.ExtendedInfo.WorkloadType -eq "SAPHana"}
+$backupItemsAFSFin     = Get-AzRecoveryServicesBackupItem -BackupManagementType AzureStorage -WorkloadType AzureFiles -VaultId $VaultToDelete.ID
+$StorageAccountsFin    = Get-AzRecoveryServicesBackupContainer -ContainerType AzureStorage -VaultId $VaultToDelete.ID
+$backupServersMARSFin  = Get-AzRecoveryServicesBackupContainer -ContainerType "Windows" -BackupManagementType MAB -VaultId $VaultToDelete.ID
+$backupServersMABSFin  = Get-AzRecoveryServicesBackupManagementServer -VaultId $VaultToDelete.ID | Where-Object { $_.BackupManagementType -eq "AzureBackupServer" }
+$backupServersDPMFin   = Get-AzRecoveryServicesBackupManagementServer -VaultId $VaultToDelete.ID | Where-Object { $_.BackupManagementType -eq "SCDPM" }
+$pvtendpointsFin       = Get-AzPrivateEndpointConnection -PrivateLinkResourceId $VaultToDelete.ID
+$fabricCount = 0; $ASRProtectedItems = 0; $ASRPolicyMappings = 0
+if ($asrContextSet) {
+    $fabricObjectsFin = Get-AzRecoveryServicesAsrFabric -ErrorAction SilentlyContinue
+    if ($null -ne $fabricObjectsFin) {
+        foreach ($fo in $fabricObjectsFin) {
+            $fabricCount++
+            foreach ($co in (Get-AzRecoveryServicesAsrProtectionContainer -Fabric $fo)) {
+                $ASRProtectedItems += (Get-AzRecoveryServicesAsrReplicationProtectedItem -ProtectionContainer $co).Count
+                $ASRPolicyMappings += (Get-AzRecoveryServicesAsrProtectionContainerMapping -ProtectionContainer $co).Count
+            }
+        }
+    }
+}
+
+if($backupItemsVMFin.count      -ne 0) { Write-Host "$($backupItemsVMFin.count) Azure VM backups pendientes." -ForegroundColor Red }
+if($backupItemsSQLFin.count     -ne 0) { Write-Host "$($backupItemsSQLFin.count) SQL Backup Items pendientes." -ForegroundColor Red }
+if($backupContainersSQLFin.count -ne 0){ Write-Host "$($backupContainersSQLFin.count) SQL Containers pendientes." -ForegroundColor Red }
+if($protectableItemsSQLFin.count -ne 0){ Write-Host "$($protectableItemsSQLFin.count) SQL Instances pendientes." -ForegroundColor Red }
+if($backupItemsSAPFin.count     -ne 0) { Write-Host "$($backupItemsSAPFin.count) SAP HANA Items pendientes." -ForegroundColor Red }
+if($backupContainersSAPFin.count -ne 0){ Write-Host "$($backupContainersSAPFin.count) SAP HANA Containers pendientes." -ForegroundColor Red }
+if($backupItemsAFSFin.count     -ne 0) { Write-Host "$($backupItemsAFSFin.count) Azure File Shares pendientes." -ForegroundColor Red }
+if($StorageAccountsFin.count    -ne 0) { Write-Host "$($StorageAccountsFin.count) Storage Accounts pendientes." -ForegroundColor Red }
+if($backupServersMARSFin.count  -ne 0) { Write-Host "$($backupServersMARSFin.count) MARS Servers pendientes." -ForegroundColor Red }
+if($backupServersMABSFin.count  -ne 0) { Write-Host "$($backupServersMABSFin.count) MAB Servers pendientes." -ForegroundColor Red }
+if($backupServersDPMFin.count   -ne 0) { Write-Host "$($backupServersDPMFin.count) DPM Servers pendientes." -ForegroundColor Red }
+if($ASRProtectedItems           -ne 0) { Write-Host "$ASRProtectedItems ASR protected items pendientes." -ForegroundColor Red }
+if($ASRPolicyMappings           -ne 0) { Write-Host "$ASRPolicyMappings ASR policy mappings pendientes." -ForegroundColor Red }
+if($fabricCount                 -ne 0) { Write-Host "$fabricCount ASR Fabrics pendientes." -ForegroundColor Red }
+if($pvtendpointsFin.count       -ne 0) { Write-Host "$($pvtendpointsFin.count) Private Endpoints pendientes." -ForegroundColor Red }
+
+# --- Verificar si hay pendientes que bloqueen el borrado ---------------------
+$pendingCount = $backupItemsVMFin.count + $backupItemsSQLFin.count + $backupContainersSQLFin.count +
+                $backupItemsSAPFin.count + $backupContainersSAPFin.count + $backupItemsAFSFin.count +
+                $StorageAccountsFin.count + $backupServersMARSFin.count + $backupServersMABSFin.count +
+                $backupServersDPMFin.count + $ASRProtectedItems + $ASRPolicyMappings +
+                $fabricCount + $pvtendpointsFin.count
+if ($pendingCount -gt 0) {
+    Write-Host "`n  ATENCION: Quedan $pendingCount elementos sin limpiar (ver lista roja arriba)." -ForegroundColor Red
+    Write-Host "  El borrado del vault probablemente fallara." -ForegroundColor Red
+    Write-Host "  Causa mas comun: permisos insuficientes (necesitas Contributor o Backup Contributor)." -ForegroundColor Red
+    $continueAnyway = Read-Host "`n  Intentar borrar el vault de todas formas? (SI/NO)"
+    if ($continueAnyway -ne "SI") {
+        Write-Host "Operacion cancelada. Resuelve los pendientes y vuelve a ejecutar." -ForegroundColor Yellow
+        exit 0
+    }
+}
+
+# --- Borrar el vault ---------------------------------------------------------
+Write-Host "`nEsperando 30s para que Azure propague las bajas..." -ForegroundColor Cyan
+Start-Sleep -Seconds 30
+
+$authHeader = @{
+    'Content-Type'  = 'application/json'
+    'Authorization' = 'Bearer ' + (Get-AzTokenString -TenantId $TenantId)
+}
+$restUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourcegroups/$ResourceGroup/providers/Microsoft.RecoveryServices/vaults/$VaultName" +
+           "?api-version=2021-06-01&operation=DeleteVaultUsingPS"
+
+try {
+    $response = Invoke-RestMethod -Uri $restUri -Headers $authHeader -Method DELETE -ErrorAction Stop
+    Write-Host "`nVault '$VaultName' eliminado correctamente." -ForegroundColor Green
+} catch {
+    Write-Host "`nERROR al eliminar el vault: $_" -ForegroundColor Red
+}
+
+$VaultDeleted = Get-AzRecoveryServicesVault -Name $VaultName -ResourceGroupName $ResourceGroup -ErrorAction SilentlyContinue
+if ($null -eq $VaultDeleted) {
+    Write-Host "Confirmado: Recovery Services Vault '$VaultName' eliminado." -ForegroundColor Green
+} else {
+    Write-Host "El vault '$VaultName' sigue existiendo. Revisa los errores anteriores." -ForegroundColor Red
+}
