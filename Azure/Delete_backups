@@ -64,8 +64,8 @@ Write-Host ""
 
 # --- Verificacion de modulos --------------------------------------------------
 Write-Host "Verificando modulos Az..." -ForegroundColor Cyan
-$RSmodule = Get-Module -Name Az.RecoveryServices -ListAvailable
-$NWmodule = Get-Module -Name Az.Network -ListAvailable
+$RSmodule  = Get-Module -Name Az.RecoveryServices -ListAvailable
+$NWmodule  = Get-Module -Name Az.Network -ListAvailable
 
 if (-not $RSmodule -or $RSmodule.Version -lt "5.3.0") {
     Write-Host "Actualizando Az.RecoveryServices..." -ForegroundColor Yellow
@@ -129,7 +129,7 @@ $TenantId       = $selectedTenant.Id
 
 # Reconectar al tenant seleccionado (necesario para MFA/Conditional Access)
 Write-Host "Conectando al tenant '$($selectedTenant.DefaultDomain)'..." -ForegroundColor Cyan
-$null = Connect-AzAccount -TenantId $TenantId -Scope Process -UseDeviceAuthentication -SkipContextPopulation
+$null = Connect-AzAccount -TenantId $TenantId -Scope Process -UseDeviceAuthentication
 
 # --- Seleccion de suscripcion ------------------------------------------------
 Write-Host "`nCargando suscripciones del tenant..." -ForegroundColor Cyan
@@ -153,7 +153,7 @@ do {
 $selectedSub    = $subscriptions[$subIndex]
 $SubscriptionId = $selectedSub.Id
 
-$context = Set-AzContext -SubscriptionId $SubscriptionId -TenantId $TenantId
+$context = Set-AzContext -SubscriptionId $SubscriptionId -TenantId $TenantId -Scope Process -ErrorAction SilentlyContinue
 if ($null -eq $context) {
     Write-Error "No se pudo establecer el contexto. Verifica permisos."
     exit 1
@@ -162,10 +162,41 @@ Write-Host "Contexto: '$($selectedSub.Name)' / Tenant: '$($selectedTenant.Defaul
 
 # --- Seleccion de vault ------------------------------------------------------
 Write-Host "`nCargando Recovery Services Vaults..." -ForegroundColor Cyan
-$vaults = @(Get-AzRecoveryServicesVault -ErrorAction SilentlyContinue)
+$activeCtx = Get-AzContext
+Write-Host "  Contexto activo: '$($activeCtx.Subscription.Name)' ($($activeCtx.Subscription.Id))" -ForegroundColor DarkGray
+
+$vaults = @()
+try {
+    $vaults = @(Get-AzRecoveryServicesVault -DefaultProfile $context -ErrorAction Stop)
+} catch {
+    Write-Host "Get-AzRecoveryServicesVault fallo: $_ -- Intentando REST API..." -ForegroundColor Yellow
+}
+
+# Fallback: listar vaults via REST API de ARM (no depende del modulo Az.Resources)
+if ($vaults.Count -eq 0) {
+    Write-Host "  Listando vaults via REST API..." -ForegroundColor Yellow
+    try {
+        $armToken  = Get-AzTokenString -TenantId $TenantId
+        $armHeader = @{ 'Authorization' = "Bearer $armToken" }
+        $armUri    = "https://management.azure.com/subscriptions/$SubscriptionId/providers/Microsoft.RecoveryServices/vaults?api-version=2021-06-01"
+        $armResp   = Invoke-RestMethod -Uri $armUri -Headers $armHeader -Method GET -ErrorAction Stop
+        foreach ($vr in $armResp.value) {
+            $rgName = ($vr.id -split '/')[4]
+            $v = Get-AzRecoveryServicesVault -ResourceGroupName $rgName -Name $vr.name -DefaultProfile $context -ErrorAction SilentlyContinue
+            if ($null -ne $v) { $vaults += $v }
+            else {
+                # Si el cmdlet falla, construir objeto minimo con los datos REST
+                $vaults += [PSCustomObject]@{ Name = $vr.name; ResourceGroupName = $rgName; ID = $vr.id; Location = $vr.location }
+            }
+        }
+    } catch {
+        Write-Host "  Error en REST API: $_" -ForegroundColor Red
+    }
+}
 
 if ($vaults.Count -eq 0) {
-    Write-Error "No se encontraron Recovery Services Vaults en esta suscripcion."
+    Write-Host "No se encontraron Recovery Services Vaults en la suscripcion '$($selectedSub.Name)'." -ForegroundColor Red
+    Write-Host "Verifica que la cuenta tiene al menos rol 'Backup Contributor' en el vault o la suscripcion." -ForegroundColor Yellow
     exit 1
 }
 
@@ -248,8 +279,8 @@ Write-Host "Disabled and soft deleted Azure File Share backups"
 foreach($item in $StorageAccounts) { Unregister-AzRecoveryServicesBackupContainer -container $item -Force -VaultId $VaultToDelete.ID }
 Write-Host "Unregistered Storage Accounts"
 
-foreach($item in $backupServersMARS) { Unregister-AzRecoveryServicesBackupContainer -Container $item -Force -VaultId $VaultToDelete.ID }
-Write-Host "Unregistered MARS Servers"
+foreach($item in $backupServersMARS) { Unregister-AzRecoveryServicesBackupContainer -Container $item -Force -VaultId $VaultToDelete.ID -ErrorAction SilentlyContinue }
+Write-Host "Unregistered MARS Servers (primer intento; la seccion MAB reintentara si hay items en soft-delete)"
 
 # === LIMPIEZA MAB/MABS ======================================================
 
