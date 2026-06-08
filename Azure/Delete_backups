@@ -21,7 +21,7 @@ Write-Host ""
 # =========================================================================================================================
 
 # =============================================================================
-#  Delete-BackupCLAM.ps1
+#  Delete-BackupVault.ps1
 #  Autor  : Kaizen Development Solutions
 #  Version: 2.0
 # =============================================================================
@@ -43,7 +43,7 @@ Write-Host ""
 #  USO
 #  ---
 #  1. Abre PowerShell 7 y navega a la carpeta donde esta el script
-#  2. Ejecuta:  .\Delete-BackupCLAM.ps1
+#  2. Ejecuta:  .\Delete-BackupVault.ps1
 #  3. Sigue los pasos en pantalla:
 #       a) Autenticate via navegador con el codigo que aparece en consola
 #       b) Elige el tenant de la lista
@@ -78,6 +78,89 @@ if (-not $NWmodule -or $NWmodule.Version -lt "4.15.0") {
     Uninstall-Module -Name Az.Network -ErrorAction SilentlyContinue
     Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope Process -Force
     Install-Module -Name Az.Network -Repository PSGallery -Force -AllowClobber
+}
+
+# --- Funcion auxiliar: mostrar errores formateados ---------------------------
+function Show-AzError {
+    param(
+        [string]$ErrorRaw,
+        [string]$Contexto = ""
+    )
+    $w = 72  # ancho interior del cuadro
+
+    function _Box-Line { param($txt, $col = "Red")
+        $txt = if ($txt.Length -gt $w) { $txt.Substring(0, $w - 3) + "..." } else { $txt }
+        Write-Host ("  | " + $txt.PadRight($w) + " |") -ForegroundColor $col
+    }
+
+    $top = "  +" + ("-" * ($w + 2)) + "+"
+    $sep = "  |" + ("-" * ($w + 2)) + "|"
+
+    # Intentar parsear JSON de error ARM
+    $code = ""; $msg = ""; $account = ""; $action = ""; $scope = ""
+    try {
+        if ($ErrorRaw -match '\{[\s\S]*"error"[\s\S]*\}') {
+            $jsonStr = [regex]::Match($ErrorRaw, '\{[\s\S]*\}').Value
+            $errObj  = $jsonStr | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($errObj.error) {
+                $code = $errObj.error.code
+                $msg  = $errObj.error.message
+            }
+        }
+    } catch {}
+
+    # Fallback: extraer de texto plano
+    if (-not $msg) { $msg = $ErrorRaw -replace '\s+', ' ' }
+    if (-not $code) {
+        if ($msg -match 'AuthorizationFailed')   { $code = "AuthorizationFailed" }
+        elseif ($msg -match 'BadRequest')         { $code = "BadRequest" }
+        elseif ($msg -match 'ResourceNotFound')   { $code = "ResourceNotFound" }
+        else                                      { $code = "Error" }
+    }
+
+    # Extraer detalles de AuthorizationFailed
+    if ($code -eq "AuthorizationFailed") {
+        if ($msg -match "client\s+'?([^'\\]+)'?\\u0027|client\s+'([^']+)'")   { $account = $Matches[1] + $Matches[2] }
+        if ($msg -match "action\s+'?([^'\\]+)'?\\u0027|action\s+'([^']+)'")   { $action  = $Matches[1] + $Matches[2] }
+        if ($msg -match "scope\s+'?([^'\\]+)'?\\u0027|scope\s+'([^']+)'")     { $scope   = $Matches[1] + $Matches[2] }
+        $msg = $msg -replace '\\u0027', "'" -replace '\\u003c', '<' -replace '\\u003e', '>'
+    }
+
+    Write-Host ""
+    Write-Host $top -ForegroundColor Red
+
+    if ($code -eq "AuthorizationFailed") {
+        _Box-Line "  PERMISOS INSUFICIENTES" "Red"
+        Write-Host $sep -ForegroundColor Red
+        if ($account) { _Box-Line "  Cuenta  : $account" "White" }
+        if ($action)  { _Box-Line "  Accion  : $action"  "White" }
+        if ($scope)   { _Box-Line "  Recurso : $scope"   "White" }
+        Write-Host $sep -ForegroundColor Red
+        _Box-Line "  SOLUCION:" "Yellow"
+        _Box-Line "  Azure Portal > Recurso > Control de acceso (IAM)" "Yellow"
+        _Box-Line "  > Agregar asignacion de rol" "Yellow"
+        _Box-Line "  > Rol: Contributor  o  Backup Contributor" "Yellow"
+        if ($account) { _Box-Line "  > Cuenta: $account" "Yellow" }
+    } else {
+        _Box-Line "  ERROR: $code" "Red"
+        Write-Host $sep -ForegroundColor Red
+        # Partir el mensaje en lineas de ancho maximo
+        $words = ($msg -replace '\\u0027',"'" -replace '\\u003c','<').Split(' ')
+        $line  = "  "
+        foreach ($w2 in $words) {
+            if (($line + $w2).Length -gt ($w - 2)) {
+                _Box-Line $line "White"; $line = "  $w2 "
+            } else { $line += "$w2 " }
+        }
+        if ($line.Trim()) { _Box-Line $line "White" }
+        if ($Contexto) {
+            Write-Host $sep -ForegroundColor Red
+            _Box-Line "  Contexto: $Contexto" "DarkGray"
+        }
+    }
+
+    Write-Host $top -ForegroundColor Red
+    Write-Host ""
 }
 
 # --- Funcion auxiliar: obtener token como texto plano ------------------------
@@ -153,10 +236,27 @@ do {
 $selectedSub    = $subscriptions[$subIndex]
 $SubscriptionId = $selectedSub.Id
 
-$context = Set-AzContext -SubscriptionId $SubscriptionId -TenantId $TenantId -Scope Process -ErrorAction SilentlyContinue
+$context = $null
+try {
+    $context = Set-AzContext -SubscriptionId $SubscriptionId -TenantId $TenantId -ErrorAction Stop
+} catch {
+    Write-Host "Set-AzContext fallo ($($_.Exception.Message)), verificando contexto actual..." -ForegroundColor Yellow
+    $context = Get-AzContext -ErrorAction SilentlyContinue
+}
+
+# Verificar que el contexto activo sea el correcto
 if ($null -eq $context) {
-    Write-Error "No se pudo establecer el contexto. Verifica permisos."
+    Write-Error "No se pudo obtener ningun contexto Az. Verifica que los modulos Az esten correctamente instalados."
     exit 1
+}
+if ($context.Subscription.Id -ne $SubscriptionId) {
+    Write-Host "El contexto activo apunta a '$($context.Subscription.Id)' en lugar de '$SubscriptionId'." -ForegroundColor Red
+    Write-Host "Intentando forzar contexto..." -ForegroundColor Yellow
+    $context = Set-AzContext -SubscriptionId $SubscriptionId -TenantId $TenantId -Force -ErrorAction SilentlyContinue
+    if ($null -eq $context -or $context.Subscription.Id -ne $SubscriptionId) {
+        Write-Error "No se pudo establecer el contexto para la suscripcion '$($selectedSub.Name)'. Verifica permisos."
+        exit 1
+    }
 }
 Write-Host "Contexto: '$($selectedSub.Name)' / Tenant: '$($selectedTenant.DefaultDomain)'" -ForegroundColor Green
 
@@ -169,7 +269,7 @@ $vaults = @()
 try {
     $vaults = @(Get-AzRecoveryServicesVault -DefaultProfile $context -ErrorAction Stop)
 } catch {
-    Write-Host "Get-AzRecoveryServicesVault fallo: $_ -- Intentando REST API..." -ForegroundColor Yellow
+    Write-Host "  Modulo RecoveryServices no encontro vaults, probando REST API..." -ForegroundColor Yellow
 }
 
 # Fallback: listar vaults via REST API de ARM (no depende del modulo Az.Resources)
@@ -185,18 +285,17 @@ if ($vaults.Count -eq 0) {
             $v = Get-AzRecoveryServicesVault -ResourceGroupName $rgName -Name $vr.name -DefaultProfile $context -ErrorAction SilentlyContinue
             if ($null -ne $v) { $vaults += $v }
             else {
-                # Si el cmdlet falla, construir objeto minimo con los datos REST
                 $vaults += [PSCustomObject]@{ Name = $vr.name; ResourceGroupName = $rgName; ID = $vr.id; Location = $vr.location }
             }
         }
     } catch {
-        Write-Host "  Error en REST API: $_" -ForegroundColor Red
+        Show-AzError -ErrorRaw $_.ToString() -Contexto "Listando vaults en suscripcion '$($selectedSub.Name)'"
     }
 }
 
 if ($vaults.Count -eq 0) {
-    Write-Host "No se encontraron Recovery Services Vaults en la suscripcion '$($selectedSub.Name)'." -ForegroundColor Red
-    Write-Host "Verifica que la cuenta tiene al menos rol 'Backup Contributor' en el vault o la suscripcion." -ForegroundColor Yellow
+    Show-AzError -ErrorRaw '{"error":{"code":"AuthorizationFailed","message":"No se encontraron vaults. La cuenta no tiene permisos suficientes sobre la suscripcion."}}' `
+                 -Contexto "Suscripcion: $($selectedSub.Name) ($SubscriptionId)"
     exit 1
 }
 
@@ -293,12 +392,7 @@ try {
     Invoke-RestMethod -Uri $secUri -Headers $secHeader -Method PATCH -Body $secBody -ErrorAction Stop
     Write-Host "Soft Delete y Enhanced Security desactivados." -ForegroundColor Green
 } catch {
-    if ($_ -match "AuthorizationFailed") {
-        Write-Host "ERROR DE PERMISOS: la cuenta no tiene 'Backup Contributor' o 'Contributor' sobre el vault." -ForegroundColor Red
-        Write-Host "         Asigna ese rol en Azure Portal -> vault -> Access Control (IAM) y vuelve a ejecutar." -ForegroundColor Red
-    } else {
-        Write-Host "Advertencia al desactivar seguridad: $_" -ForegroundColor Yellow
-    }
+    Show-AzError -ErrorRaw $_.ToString() -Contexto "Desactivando Soft Delete / Enhanced Security en '$VaultName'"
 }
 Start-Sleep -Seconds 10
 
@@ -346,12 +440,7 @@ foreach($item in $backupServersMABS) {
             Invoke-RestMethod -Uri $mabUri -Headers $mabHeader -Method DELETE -ErrorAction Stop
             Write-Host "  MAB Server '$($item.Name)' dado de baja via REST API." -ForegroundColor Green
         } catch {
-            if ($_ -match "AuthorizationFailed") {
-                Write-Host "  ERROR DE PERMISOS al dar de baja '$($item.Name)'." -ForegroundColor Red
-                Write-Host "  La cuenta necesita rol 'Contributor' o 'Backup Contributor' sobre el vault." -ForegroundColor Red
-            } else {
-                Write-Host "  ERROR dando de baja '$($item.Name)': $_" -ForegroundColor Red
-            }
+            Show-AzError -ErrorRaw $_.ToString() -Contexto "Dando de baja MAB Server '$($item.Name)'"
         }
     }
 }
