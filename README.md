@@ -6,6 +6,7 @@ Scripts y automatizaciones para frikis de IT
 | Carpeta / script | Descripción |
 |---|---|
 | [ClaudeCad](ClaudeCad/) | Instalador idempotente y bilingüe que conecta Claude Desktop con FreeCAD mediante MCP (`Install-ClaudeCad.ps1`). |
+| [NtlmCheck](NtlmCheck/) | Diagnostica por qué Windows bloquea el acceso SMB a un NAS o equipo fuera de dominio ("la autenticación NTLM está deshabilitada") tras la acumulativa de octubre de 2026 (KB5127648). Solo lectura y bilingüe (`Test-NtlmHardening.ps1`). |
 | [AdminLocalReport](AdminLocalReport) | Audita los miembros del grupo de Administradores locales de Windows, con independencia del idioma y de si el equipo está en dominio. Devuelve `OK` o `ALERTA` con los usuarios inesperados; pensado como campo personalizado en un RMM. |
 | [Azure/Delete_backups](Azure/Delete_backups) | Elimina un Recovery Services Vault de Azure y todos sus elementos asociados (backups de VM, SQL, SAP HANA, Azure Files, MARS/MABS/DPM, ASR). |
 | [DLNA-legacy-converter.ps1](DLNA-legacy-converter.ps1) | Prepara vídeos `.avi`/`.mkv`/`.mp4` para reproducción directa en televisores DLNA antiguos (2012-2018). Analiza cada fichero con ffprobe y solo remultiplexa o recodifica lo necesario. |
