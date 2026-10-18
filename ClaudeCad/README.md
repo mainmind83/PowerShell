@@ -1,6 +1,6 @@
 # Claude + CAD
 
-**Install-ClaudeCad.ps1 · v1.4.1 · by [mainmind.com](https://mainmind.com)**
+**Install-ClaudeCad.ps1 · v1.5.0 · by [mainmind.com](https://mainmind.com)**
 
 🇪🇸 Español · [🇬🇧 English](README.en.md)
 
