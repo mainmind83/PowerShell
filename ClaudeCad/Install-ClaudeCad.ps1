@@ -18,6 +18,10 @@
     Fuerza la carpeta de usuario de FreeCAD / Forces the FreeCAD user folder
     (output of FreeCAD.getUserAppDataDir()).
 
+.PARAMETER ClaudeConfigPath
+    Ruta(s) exacta(s) del claude_desktop_config.json (Claude > Ajustes > Desarrollador > Editar config).
+    Si se indica, solo se tocan esas. / Exact config path(s); when given, only those are edited.
+
 .PARAMETER SkipClaudeConfig
     No toca la configuración de Claude Desktop / Does not touch Claude Desktop config.
 
@@ -41,6 +45,7 @@ param(
     [string]$Lang,
     [string]$WorkDir = 'C:\mainmind\ClaudeCad',
     [string]$FreeCADUserDir,
+    [string[]]$ClaudeConfigPath,
     [switch]$SkipClaudeConfig,
     [ValidateSet('text', 'image')]
     [string]$Feedback,
@@ -48,7 +53,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.4.1'
+$ScriptVersion = '1.5.0'
 $RepoUrl   = 'https://github.com/neka-nat/freecad-mcp.git'
 $ZipUrl    = 'https://github.com/neka-nat/freecad-mcp/archive/refs/heads/main.zip'
 $RepoDir   = Join-Path $WorkDir 'freecad-mcp'
@@ -117,6 +122,11 @@ $Strings = @{
     S6Name        = '6. Config Claude'
     CfgSkipParam  = 'Omitido por parámetro -SkipClaudeConfig'
     CfgFile       = 'Fichero: {0}'
+    WarmRun       = 'Preparando el entorno de freecad-mcp (la primera vez descarga Python y dependencias)...'
+    WarmOk        = 'Entorno de freecad-mcp listo: Claude Desktop arrancará el servidor sin esperas'
+    WarmFail      = 'No se pudo preparar freecad-mcp (código {0}). Claude lo intentará al arrancar y puede marcarlo como Fallido. Salida: {1}'
+    CfgNone       = 'No se encontró ningún claude_desktop_config.json; se crea en {0}'
+    CfgMulti      = 'Hay {0} ficheros de configuración de Claude: se actualizan todos (la app solo lee uno)'
     CfgBadJson    = 'claude_desktop_config.json no es JSON válido. Corrígelo a mano: {0}'
     CfgOk         = 'La entrada "freecad" ya está configurada correctamente (modo: {0})'
     CfgOkS        = 'Ya presente ({0})'
@@ -245,6 +255,11 @@ $Strings = @{
     S6Name        = '6. Claude config'
     CfgSkipParam  = 'Skipped by -SkipClaudeConfig'
     CfgFile       = 'File: {0}'
+    WarmRun       = 'Preparing the freecad-mcp environment (first run downloads Python and dependencies)...'
+    WarmOk        = 'freecad-mcp environment ready: Claude Desktop will start the server without delay'
+    WarmFail      = 'Could not prepare freecad-mcp (exit code {0}). Claude will try at startup and may mark it as Failed. Output: {1}'
+    CfgNone       = 'No claude_desktop_config.json found; creating {0}'
+    CfgMulti      = 'Found {0} Claude config files: updating all of them (the app reads only one)'
     CfgBadJson    = 'claude_desktop_config.json is not valid JSON. Fix it manually: {0}'
     CfgOk         = 'The "freecad" entry is already configured correctly (mode: {0})'
     CfgOkS        = 'Already present ({0})'
@@ -552,29 +567,65 @@ if ($SkipClaudeConfig) {
     Write-Skip (T CfgSkipParam)
     Add-Result (T S6Name) $false '-SkipClaudeConfig'
 } else {
-    # Instalación clásica vs. MSIX (Microsoft Store) / Classic vs. MSIX install
-    $candidates = @(Join-Path $env:APPDATA 'Claude\claude_desktop_config.json')
-    $candidates += Get-ChildItem "$env:LOCALAPPDATA\Packages\Claude_*\LocalCache\Roaming\Claude" -Directory -ErrorAction SilentlyContinue |
-                   ForEach-Object { Join-Path $_.FullName 'claude_desktop_config.json' }
-
-    $cfgPath = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    $isNew = -not $cfgPath
-    if ($isNew) { $cfgPath = $candidates[0] }
-    Write-Ok (T CfgFile $cfgPath)
-
-    $cfg = [pscustomobject]@{}
-    if (-not $isNew) {
-        $raw = Get-Content $cfgPath -Raw -Encoding UTF8
-        if ($raw -and $raw.Trim()) {
-            try { $cfg = $raw | ConvertFrom-Json }
-            catch { throw (T CfgBadJson $cfgPath) }
+    # Ubicaciones conocidas de claude_desktop_config.json / Known config locations.
+    # Cambian entre versiones de Claude Desktop (clásica, MSIX/Store, Claude-Data) y la app
+    # solo lee UNA. En vez de adivinar cuál, se actualizan todas las que existan.
+    # They differ across Claude Desktop builds and the app reads only ONE: update every one found.
+    function Find-ClaudeConfigs {
+        $list = @()
+        $list += Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+        $list += @(Get-ChildItem "$env:LOCALAPPDATA\Packages" -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue |
+                   ForEach-Object { Join-Path $_.FullName 'LocalCache\Roaming\Claude\claude_desktop_config.json' })
+        $dataRoot = Join-Path $env:LOCALAPPDATA 'Claude-Data'
+        if (Test-Path $dataRoot) {
+            $list += @(Get-ChildItem $dataRoot -Recurse -Depth 3 -File -Filter 'claude_desktop_config.json' -ErrorAction SilentlyContinue |
+                       ForEach-Object { $_.FullName })
         }
+        $list | Select-Object -Unique
+    }
+    function Get-NewConfigPath {
+        # Sin ningún fichero: la ubicación de la versión más reciente que esté instalada
+        $dataDirs = @(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Claude-Data') -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue)
+        if ($dataDirs) { return Join-Path $dataDirs[0].FullName 'claude_desktop_config.json' }
+        $pkg = @(Get-ChildItem "$env:LOCALAPPDATA\Packages" -Directory -Filter 'Claude_*' -ErrorAction SilentlyContinue)
+        if ($pkg) { return Join-Path $pkg[0].FullName 'LocalCache\Roaming\Claude\claude_desktop_config.json' }
+        return Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+    }
+    function Read-ClaudeConfig([string]$Path) {
+        $c = [pscustomobject]@{}
+        if (Test-Path $Path) {
+            $raw = Get-Content $Path -Raw -Encoding UTF8
+            if ($raw -and $raw.Trim()) {
+                try { $c = $raw | ConvertFrom-Json }
+                catch { throw (T CfgBadJson $Path) }
+            }
+        }
+        return $c
+    }
+    function Get-FreecadEntry($Cfg) {
+        if (($Cfg.PSObject.Properties.Name -contains 'mcpServers') -and
+            ($Cfg.mcpServers.PSObject.Properties.Name -contains 'freecad')) { return $Cfg.mcpServers.freecad }
+        return $null
     }
 
+    if ($ClaudeConfigPath) {
+        $targets = @($ClaudeConfigPath)
+    } else {
+        $targets = @(Find-ClaudeConfigs | Where-Object { Test-Path $_ })
+        if ($targets.Count -eq 0) {
+            $targets = @(Get-NewConfigPath)
+            Write-Warn2 (T CfgNone $targets[0])
+        } elseif ($targets.Count -gt 1) {
+            Write-Warn2 (T CfgMulti $targets.Count)
+        }
+    }
+    foreach ($t in $targets) { Write-Ok (T CfgFile $t) }
+
+    # Entrada actual: la primera que exista en cualquiera de los ficheros / current entry, first found
     $current = $null
-    if (($cfg.PSObject.Properties.Name -contains 'mcpServers') -and
-        ($cfg.mcpServers.PSObject.Properties.Name -contains 'freecad')) {
-        $current = $cfg.mcpServers.freecad
+    foreach ($t in $targets) {
+        $e = Get-FreecadEntry (Read-ClaudeConfig $t)
+        if ($e) { $current = $e; break }
     }
     # Modo de respuesta / Feedback mode
     $TextFlag  = '--only-text-feedback'
@@ -582,7 +633,6 @@ if ($SkipClaudeConfig) {
     $curText   = $curArgs -contains $TextFlag
     # Conservar otros argumentos que haya puesto el usuario (p. ej. --host) / keep user's extra args
     $extraArgs = @($curArgs | Where-Object { $_ -ne 'freecad-mcp' -and $_ -ne $TextFlag })
-    $baseOk    = $current -and ($current.command -eq $UvxPath) -and ($curArgs.Count -gt 0) -and ($curArgs[0] -eq 'freecad-mcp')
 
     if ($Feedback) {
         $wantText = ($Feedback -eq 'text')
@@ -606,12 +656,22 @@ if ($SkipClaudeConfig) {
         $wantText = ($r -eq $yes)
     }
     $modeName = if ($wantText) { T ModeText } else { T ModeImage }
-    $upToDate = $baseOk -and ($curText -eq $wantText)
+    $newArgs = @('freecad-mcp')
+    if ($wantText) { $newArgs += $TextFlag }
+    $newArgs += $extraArgs
 
-    if ($upToDate -and -not $Force) {
-        Write-Skip (T CfgOk $modeName)
-        Add-Result (T S6Name) $false (T CfgOkS $modeName)
-    } else {
+    $changed = 0
+    foreach ($cfgPath in $targets) {
+        $isNew = -not (Test-Path $cfgPath)
+        $cfg   = Read-ClaudeConfig $cfgPath
+        $cur   = Get-FreecadEntry $cfg
+        $cArgs = if ($cur) { @($cur.args) } else { @() }
+        $upToDate = $cur -and ($cur.command -eq $UvxPath) -and
+                    ((@($cArgs) -join ' ') -eq (@($newArgs) -join ' '))
+        if ($upToDate -and -not $Force) {
+            Write-Skip ("{0}  [{1}]" -f (T CfgOk $modeName), $cfgPath)
+            continue
+        }
         if ($isNew) {
             New-Item -ItemType Directory -Path (Split-Path $cfgPath) -Force | Out-Null
             Write-Warn2 (T CfgNew)
@@ -620,18 +680,14 @@ if ($SkipClaudeConfig) {
             Copy-Item $cfgPath $backup
             Write-Ok (T CfgBackup $backup)
         }
-
         if (-not ($cfg.PSObject.Properties.Name -contains 'mcpServers')) {
             $cfg | Add-Member -NotePropertyName mcpServers -NotePropertyValue ([pscustomobject]@{})
         }
-        $newArgs = @('freecad-mcp')
-        if ($wantText) { $newArgs += $TextFlag }
-        $newArgs += $extraArgs
         # Ruta absoluta a uvx / Absolute uvx path: Claude Desktop may not inherit PATH
         $server = [ordered]@{ command = $UvxPath; args = $newArgs }
-        if ($current -and ($current.PSObject.Properties.Name -contains 'env')) { $server.env = $current.env }
+        if ($cur -and ($cur.PSObject.Properties.Name -contains 'env')) { $server.env = $cur.env }
         $server = [pscustomobject]$server
-        if ($current) {
+        if ($cur) {
             $cfg.mcpServers.freecad = $server
             $action = T CfgUpdated $modeName
         } else {
@@ -639,8 +695,29 @@ if ($SkipClaudeConfig) {
             $action = T CfgAdded $modeName
         }
         Write-Utf8NoBom $cfgPath ($cfg | ConvertTo-Json -Depth 20)
-        Write-Ok $action
-        Add-Result (T S6Name) $true $action
+        Write-Ok ("{0}  [{1}]" -f $action, $cfgPath)
+        $changed++
+    }
+    if ($changed -gt 0) { Add-Result (T S6Name) $true ("{0} ({1})" -f (T CfgAdded $modeName), $changed) }
+    else                { Add-Result (T S6Name) $false (T CfgOkS $modeName) }
+}
+
+# 6b. Precarga del entorno de uvx / uvx environment warm-up.
+# La primera ejecución de "uvx freecad-mcp" descarga Python 3.12 y ~40 paquetes. Si eso ocurre
+# al abrir Claude Desktop, la app agota su espera y marca el servidor como "Fallido"
+# ("Server disconnected"). Se hace aquí, una vez, para que el arranque desde Claude sea inmediato.
+# First "uvx freecad-mcp" run downloads Python + deps; if Claude Desktop triggers it, it times out.
+if (-not $SkipClaudeConfig) {
+    Write-Ok (T WarmRun)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # uv escribe el progreso en stderr / uv logs progress to stderr
+    $warmOut = & $UvxPath freecad-mcp --help 2>&1 | Out-String
+    $warmCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+    if ($warmCode -eq 0) { Write-Ok (T WarmOk) }
+    else {
+        $tail = ($warmOut.Trim() -split "`r?`n" | Select-Object -Last 5) -join ' | '
+        Write-Warn2 (T WarmFail $warmCode $tail)
     }
 }
 
