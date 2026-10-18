@@ -45,6 +45,7 @@ powershell -ExecutionPolicy Bypass -File .\Install-ClaudeCad.ps1
 | `-Lang es\|en` | Idioma de los mensajes. Si no se indica, detecta el idioma de Windows y pregunta (Enter acepta el detectado). |
 | `-WorkDir <ruta>` | Directorio de trabajo. Por defecto `C:\mainmind\ClaudeCad`. |
 | `-FreeCADUserDir <ruta>` | Fuerza la carpeta de usuario de FreeCAD si la detección falla (salida de `FreeCAD.getUserAppDataDir()` en la consola Python de FreeCAD). |
+| `-ClaudeConfigPath` | Ruta exacta del `claude_desktop_config.json` (la que abre Claude > Ajustes > Desarrollador > Editar config). Si se indica, solo se modifica esa. |
 | `-SkipClaudeConfig` | No modifica la configuración de Claude Desktop. |
 | `-Feedback text\|image` | Modo de respuesta de FreeCAD hacia Claude. `text` añade `--only-text-feedback` (menos tokens). Si no se indica, se explica y se pregunta en cada ejecución (Enter mantiene el modo actual). |
 | `-Force` | Rehace todos los pasos aunque ya estén hechos. |
@@ -56,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File .\Install-ClaudeCad.ps1
 3. **uv.** Usa `uv`/`uvx` desde `WorkDir\bin`, o lo instala ahí si falta. No modifica el PATH ni el perfil del usuario.
 4. **Carpeta de usuario de FreeCAD.** Busca la ruta por defecto `%APPDATA%\FreeCAD\vX-Y` y, si hay varias versiones, elige la más alta. Si no la encuentra, pide abrir FreeCAD una vez y pregunta (S/N) antes de seguir. Crea la carpeta `Mod` si no existe, que es lo normal hasta instalar el primer addon.
 5. **Addon.** Copia `addon\FreeCADMCP` a `Mod\FreeCADMCP`. Compara huellas SHA-256 y solo copia si hay diferencias.
-6. **Configuración de Claude Desktop.** Añade la entrada `freecad` a `claude_desktop_config.json`, con la ruta absoluta de `uvx.exe`. Respeta las demás entradas, hace una copia de seguridad (`.bak-fecha`) solo cuando va a escribir y guarda en UTF-8 sin BOM. Detecta también la instalación desde Microsoft Store (MSIX).
+6. **Configuración de Claude Desktop.** Añade la entrada `freecad` a `claude_desktop_config.json`, con la ruta absoluta de `uvx.exe`. Respeta las demás entradas, hace una copia de seguridad (`.bak-fecha`) solo cuando va a escribir y guarda en UTF-8 sin BOM. Busca el fichero en todas las ubicaciones conocidas (`%APPDATA%\Claude`, la copia MSIX en `Packages\Claude_*` y `%LOCALAPPDATA%\Claude-Data\Claude_*`) y actualiza todas las que existan, porque según la versión la app solo lee una. Después **precarga el entorno** ejecutando una vez `uvx freecad-mcp --help`: la primera ejecución descarga Python 3.12 y unos 40 paquetes, y si eso ocurre al abrir Claude Desktop la app agota su espera y marca el servidor como *Fallido*.
    - **Modo de respuesta.** En cada ejecución muestra el modo actual y pregunta si usar el modo **solo texto** (`--only-text-feedback`):
      - *Imágenes + texto* (por defecto): cada operación devuelve además una captura del modelo. Claude ve el resultado, pero cada captura consume bastantes más tokens.
      - *Solo texto*: devuelve nombres de objetos, dimensiones y éxito/error. Consume **muchos menos tokens**. Claude puede seguir pidiendo una vista cuando la necesite con `get_view`.
@@ -79,6 +80,16 @@ Se puede ejecutar tantas veces como se quiera. Cada paso comprueba su estado y, 
 ## Después de instalar
 
 Sigue los *siguientes pasos* que muestra el script al terminar: dependen de si FreeCAD y Claude Desktop estaban abiertos y de qué ha cambiado.
+
+Claude Desktop arranca todos los servidores MCP locales al abrirse, aunque no los vayas a usar. No necesita que FreeCAD esté abierto: `freecad-mcp` arranca igual, deja un aviso en el registro y las herramientas solo fallan si las usas con FreeCAD cerrado.
+
+### Problemas frecuentes
+
+| Síntoma | Causa | Solución |
+|---|---|---|
+| `freecad` no aparece en *Ajustes > Desarrollador > Servidores MCP locales* | La entrada se escribió en un `claude_desktop_config.json` que tu versión de Claude no lee (hay varias ubicaciones según la versión). | Vuelve a ejecutar el script (≥ 1.5.0), que actualiza todas. O indica el fichero exacto con `-ClaudeConfigPath`, usando la ruta que abre *Editar configuración*. |
+| `freecad` aparece como **Fallido** / *Server disconnected* en un equipo nuevo | La primera ejecución de `uvx freecad-mcp` descarga Python y dependencias, y Claude agota la espera. | El script ≥ 1.5.0 lo precarga. A mano: `& C:\mainmind\ClaudeCad\bin\uvx.exe freecad-mcp --help` y reinicia Claude. |
+| Sigue en **Fallido** después de lo anterior | Otro error del proceso. | *Ver registros* en esa misma pantalla muestra el motivo. |
 
 ## Capturas
 
@@ -105,6 +116,7 @@ Sigue los *siguientes pasos* que muestra el script al terminar: dependen de si F
 
 | Versión | Cambios |
 |---|---|
+| 1.5.0 | Configuración de Claude: busca `claude_desktop_config.json` en todas las ubicaciones conocidas (incluida `%LOCALAPPDATA%\Claude-Data`) y actualiza todas; nuevo parámetro `-ClaudeConfigPath`. Precarga del entorno de `uvx` para evitar el *Fallido* en el primer arranque. Sección de problemas frecuentes. |
 | 1.4.1 | La pregunta del modo de respuesta se hace en cada ejecución, mostrando el modo actual (Enter lo mantiene). |
 | 1.4.0 | Opción de modo solo texto (`--only-text-feedback`) en la configuración de Claude, con pregunta y parámetro `-Feedback`. Conserva argumentos y `env` existentes. |
 | 1.3.0 | Paso 10: detección de Claude Desktop. Siguientes pasos calculados según el estado real (sin reinicios innecesarios). Nota de seguridad revisada. |
