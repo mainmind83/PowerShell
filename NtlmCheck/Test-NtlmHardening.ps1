@@ -45,7 +45,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ScriptVersion  = '1.0.0'
+$ScriptVersion  = '1.1.0'
 $AffectedBuilds = @(26100, 26200, 26300)   # Windows 11 24H2 / 25H2 / 26H2, Server 2025
 $OctoberUbr     = 9711                     # KB5127648 (2026-10-13)
 $KbUrl          = 'https://support.microsoft.com/help/5066470'
@@ -144,12 +144,23 @@ $Strings = @{
     EvBlockedS    = 'Bloqueado'
     EvOk          = 'Última autenticación correcta: {0} el {1} (evento 4020)'
     EvOkFixed     = 'Hubo {0} bloqueo(s) anteriores: ya resuelto'
-    S9            = '9. Sesión SMB activa'
-    S9Name        = '9. Sesión SMB'
+    S9            = '9. Unidades de red y sesiones SMB con el destino'
+    S9Name        = '9. Unidades/sesiones'
+    MapNone       = 'No hay unidades de red asignadas a este destino'
+    MapItem       = 'Unidad {0} -> {1} (estado: {2})'
+    MapNoLetter   = 'sin letra'
+    MapBlock      = 'La asignación {0} se creó con -BlockNTLM: bloquea NTLM aunque la configuración global no lo haga'
+    MapBad        = 'La asignación {0} está en estado {1}: ahora mismo no se puede usar'
+    ElevHidden    = 'Consola de administrador: las unidades asignadas desde la sesión sin elevar pueden no verse aquí (EnableLinkedConnections no está activo)'
     SessNone      = 'No hay ninguna sesión SMB abierta con el destino'
-    SessNoneS     = 'Sin sesión'
-    SessOk        = '{0}  dialecto {1}, usuario {2}, firmada={3}, cifrada={4}'
-    SessCache     = 'Una sesión abierta no vuelve a autenticarse: para probar de verdad, desconecta (net use \\{0} /delete) y reconecta'
+    SessOk        = 'Sesión {0}  dialecto {1}, credencial {2}, firmada={3}, cifrada={4}'
+    SessIdle      = 'Hay unidades asignadas pero ninguna sesión abierta: Windows cierra las sesiones inactivas y vuelve a autenticarse al abrir la unidad. Ábrela y vuelve a ejecutar el script para ver la sesión'
+    SessCache     = 'Una sesión abierta no vuelve a autenticarse: para probar un cambio, desconecta las unidades (net use X: /delete) y reconecta'
+    CredStored    = 'Credencial guardada para este destino en el Administrador de credenciales: {0}'
+    CredNone      = 'No hay credenciales guardadas para este destino'
+    MapSessS      = '{0} unidad(es), {1} sesión(es)'
+    DxMapBlock    = 'Causa probable: una unidad de red asignada con -BlockNTLM, que bloquea NTLM solo para esa asignación.'
+    NsMapBlock    = 'Elimina la asignación (Remove-SmbMapping -LocalPath {0}) y vuelve a crearla sin -BlockNTLM (net use {0} {1}).'
     Summary       = 'Resumen'
     Diagnosis     = 'Diagnóstico'
     NextTitle     = 'Siguientes pasos:'
@@ -161,7 +172,7 @@ $Strings = @{
     DxUnknown     = 'Hay bloqueos registrados, pero ninguna configuración local los explica. Revisa Microsoft-Windows-SMBClient/Security.'
     DxOk          = 'No se detectan bloqueos NTLM hacia este destino.'
     DxRisk        = 'Este equipo es vulnerable al bloqueo de KB5127648 aunque ahora no haya fallos registrados.'
-    NsCg          = 'Recomendado: activa Credential Guard (gpedit.msc > Plantillas administrativas > Sistema > Device Guard > Activar la seguridad basada en la virtualización > Credential Guard "Habilitado sin bloqueo UEFI"). Puedes dejar la integridad de código deshabilitada si te da problemas con drivers o juegos.'
+    NsCg          = 'Recomendado: activa Credential Guard. En gpedit.msc > Plantillas administrativas > Sistema > Device Guard > Activar la seguridad basada en la virtualización: "Habilitada" y, en el desplegable "Configuración de Credential Guard", "Habilitar sin bloqueo". No lo confundas con "Protección basada en la virtualización de la integridad de código" (HVCI): es otra función y puedes dejarla en "Deshabilitado" si te da problemas con drivers o juegos.'
     NsCgVbs       = 'Para eso, quita primero el "Deshabilitada" de esa misma directiva: ahora mismo impide cualquier servicio de VBS.'
     NsBlk0        = 'Alternativa si Credential Guard no es viable: BlockNtlmv1SSO = 0 en HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0. Afecta a todo el equipo y es temporal: documéntalo como decisión.'
     NsReboot      = 'Reinicia, desconecta la unidad o sesión existente y vuelve a conectar para que se autentique de nuevo.'
@@ -269,12 +280,23 @@ $Strings = @{
     EvBlockedS    = 'Blocked'
     EvOk          = 'Last successful authentication: {0} on {1} (event 4020)'
     EvOkFixed     = 'There were {0} earlier block(s): already solved'
-    S9            = '9. Active SMB session'
-    S9Name        = '9. SMB session'
+    S9            = '9. Network drives and SMB sessions with the target'
+    S9Name        = '9. Drives/sessions'
+    MapNone       = 'No network drives mapped to this target'
+    MapItem       = 'Drive {0} -> {1} (status: {2})'
+    MapNoLetter   = 'no letter'
+    MapBlock      = 'Mapping {0} was created with -BlockNTLM: it blocks NTLM even if the global setting does not'
+    MapBad        = 'Mapping {0} is in status {1}: it cannot be used right now'
+    ElevHidden    = 'Administrator console: drives mapped from the non-elevated session may not show here (EnableLinkedConnections is not enabled)'
     SessNone      = 'No SMB session open with the target'
-    SessNoneS     = 'No session'
-    SessOk        = '{0}  dialect {1}, user {2}, signed={3}, encrypted={4}'
-    SessCache     = 'An open session does not re-authenticate: to test for real, disconnect (net use \\{0} /delete) and reconnect'
+    SessOk        = 'Session {0}  dialect {1}, credential {2}, signed={3}, encrypted={4}'
+    SessIdle      = 'Drives are mapped but no session is open: Windows closes idle sessions and authenticates again when the drive is opened. Open it and run the script again to see the session'
+    SessCache     = 'An open session does not re-authenticate: to test a change, disconnect the drives (net use X: /delete) and reconnect'
+    CredStored    = 'Saved credential for this target in Credential Manager: {0}'
+    CredNone      = 'No saved credentials for this target'
+    MapSessS      = '{0} drive(s), {1} session(s)'
+    DxMapBlock    = 'Likely cause: a network drive mapped with -BlockNTLM, which blocks NTLM for that mapping only.'
+    NsMapBlock    = 'Remove the mapping (Remove-SmbMapping -LocalPath {0}) and create it again without -BlockNTLM (net use {0} {1}).'
     Summary       = 'Summary'
     Diagnosis     = 'Diagnosis'
     NextTitle     = 'Next steps:'
@@ -286,7 +308,7 @@ $Strings = @{
     DxUnknown     = 'Blocks are logged, but no local setting explains them. Check Microsoft-Windows-SMBClient/Security.'
     DxOk          = 'No NTLM blocks detected towards this target.'
     DxRisk        = 'This computer is exposed to the KB5127648 block even though no failures are logged right now.'
-    NsCg          = 'Recommended: enable Credential Guard (gpedit.msc > Administrative Templates > System > Device Guard > Turn On Virtualization Based Security > Credential Guard "Enabled without UEFI lock"). You can leave code integrity disabled if it causes trouble with drivers or games.'
+    NsCg          = 'Recommended: enable Credential Guard. In gpedit.msc > Administrative Templates > System > Device Guard > Turn On Virtualization Based Security: "Enabled" and, in the "Credential Guard Configuration" drop-down, "Enabled without lock". Do not confuse it with "Virtualization Based Protection of Code Integrity" (HVCI): it is a different feature and you can set it to "Disabled" if it causes trouble with drivers or games.'
     NsCgVbs       = 'To do that, first remove the "Disabled" setting from that same policy: right now it prevents every VBS service.'
     NsBlk0        = 'Fallback if Credential Guard is not viable: BlockNtlmv1SSO = 0 in HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0. It is machine-wide and temporary: document it as a decision.'
     NsReboot      = 'Reboot, disconnect the existing drive or session and reconnect so it authenticates again.'
@@ -716,33 +738,88 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# 9. Sesión SMB activa / Active SMB session
+# 9. Unidades de red y sesiones SMB / Network drives and SMB sessions
 # ---------------------------------------------------------------------------
 Write-Step (T S9)
-$sessions = @()
+
+function Test-TargetHost([string]$Name) {
+    if (-not $Name) { return $false }
+    $n = $Name.ToLower()
+    return ($matchNames -contains $n) -or ($matchNames -contains $n.Split('.')[0])
+}
+function Get-UncHost([string]$Path) {
+    if ($Path -match '^\\\\([^\\]+)') { return $Matches[1] }
+    return $null
+}
+
+# Unidades asignadas (net use / New-SmbMapping) del usuario actual
+# Mapped drives (net use / New-SmbMapping) of the current user
+$mappings = @()
 try {
-    $sessions = @(Get-SmbConnection -ErrorAction Stop | Where-Object {
-            $s = $_.ServerName.ToLower()
-            ($matchNames -contains $s) -or ($matchNames -contains $s.Split('.')[0])
-        })
+    $mappings = @(Get-SmbMapping -ErrorAction Stop | Where-Object { Test-TargetHost (Get-UncHost $_.RemotePath) })
 }
 catch { }
 
-if ($sessions.Count -eq 0) {
-    Write-Info (T SessNone)
-    Add-Result (T S9Name) 'INFO' (T SessNoneS)
+# Sesiones SMB abiertas: solo existen mientras hay actividad; las inactivas se cierran
+# Open SMB sessions: they only exist while active; idle ones are closed
+$sessions = @()
+try {
+    $sessions = @(Get-SmbConnection -ErrorAction Stop | Where-Object { Test-TargetHost $_.ServerName })
+}
+catch { }
+
+$mapBlocked = $null
+$s9State = 'INFO'
+if ($mappings.Count -eq 0) {
+    Write-Info (T MapNone)
+    $linked = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLinkedConnections'
+    if ($isAdmin -and $linked -ne 1) { Write-Info (T ElevHidden) }
 }
 else {
-    foreach ($s in $sessions) {
-        $p = $s.PSObject.Properties.Name
-        $signed    = if ($p -contains 'Signed')    { $s.Signed }    else { $null }
-        $encrypted = if ($p -contains 'Encrypted') { $s.Encrypted } else { $null }
-        Write-Ok (T SessOk ('\\{0}\{1}' -f $s.ServerName, $s.ShareName) $s.Dialect $s.UserName (Format-Bool $signed) (Format-Bool $encrypted))
+    foreach ($m in $mappings) {
+        $letter = if ($m.LocalPath) { $m.LocalPath } else { T MapNoLetter }
+        Write-Info (T MapItem $letter $m.RemotePath $m.Status)
+        $mp = $m.PSObject.Properties.Name
+        if ($mp -contains 'BlockNTLM' -and $m.BlockNTLM -eq $true) {
+            Write-Fail (T MapBlock $letter)
+            $s9State = 'FAIL'
+            if (-not $mapBlocked) { $mapBlocked = $m }
+        }
+        elseif ("$($m.Status)" -notin 'OK', '0') {
+            Write-Warn2 (T MapBad $letter $m.Status)
+            if ($s9State -ne 'FAIL') { $s9State = 'WARN' }
+        }
     }
-    Write-Info (T SessCache $tgt.Host)
-    $dialects = ($sessions | Select-Object -ExpandProperty Dialect -Unique) -join ', '
-    Add-Result (T S9Name) 'OK' ('{0} ({1})' -f $sessions.Count, $dialects)
 }
+
+if ($sessions.Count -eq 0) {
+    if ($mappings.Count -gt 0) { Write-Info (T SessIdle) } else { Write-Info (T SessNone) }
+}
+else {
+    foreach ($c in $sessions) {
+        $p = $c.PSObject.Properties.Name
+        $signed    = if ($p -contains 'Signed')     { $c.Signed }     else { $null }
+        $encrypted = if ($p -contains 'Encrypted')  { $c.Encrypted }  else { $null }
+        $cred      = if ($p -contains 'Credential' -and $c.Credential) { $c.Credential } else { $c.UserName }
+        Write-Ok (T SessOk ('\\{0}\{1}' -f $c.ServerName, $c.ShareName) $c.Dialect $cred (Format-Bool $signed) (Format-Bool $encrypted))
+    }
+    Write-Info (T SessCache)
+    if ($s9State -eq 'INFO') { $s9State = 'OK' }
+}
+
+# Credenciales guardadas para el destino / Saved credentials for the target
+$credLines = @()
+try {
+    $credLines = @(cmdkey /list 2>$null | Where-Object {
+            $line = $_
+            [bool]($matchNames | Where-Object { $line -match ('[=:]\s*' + [regex]::Escape($_) + '\s*$') })
+        } | ForEach-Object { ($_ -replace '^[^:]+:\s*', '').Trim() })
+}
+catch { }
+if ($credLines.Count -gt 0) { Write-Info (T CredStored ($credLines -join ', ')) }
+else { Write-Info (T CredNone) }
+
+Add-Result (T S9Name) $s9State (T MapSessS $mappings.Count $sessions.Count)
 
 # ---------------------------------------------------------------------------
 # Resumen / Summary
@@ -778,7 +855,11 @@ else {
         $dx += T DxRs
         $next += T NsRsExc
     }
-    if ($evBlocked -and $kbEnforcing -and -not $smbBlocking -and -not $rsBlocking) {
+    if ($mapBlocked) {
+        $dx += T DxMapBlock
+        $next += T NsMapBlock $mapBlocked.LocalPath $mapBlocked.RemotePath
+    }
+    if ($evBlocked -and $kbEnforcing -and -not $smbBlocking -and -not $rsBlocking -and -not $mapBlocked) {
         $dx += T DxKb
     }
     if ($kbEnforcing -and -not $cgRunning) {

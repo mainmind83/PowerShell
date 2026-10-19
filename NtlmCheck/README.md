@@ -1,6 +1,6 @@
 # NTLM Check
 
-**Test-NtlmHardening.ps1 · v1.0.0 · by [mainmind.com](https://mainmind.com)**
+**Test-NtlmHardening.ps1 · v1.1.0 · by [mainmind.com](https://mainmind.com)**
 
 🇪🇸 Español · [🇬🇧 English](README.en.md)
 
@@ -62,7 +62,7 @@ Código de salida: `0` si no hay fallos y `1` si los hay, para poder usarlo desd
 6. **Bloqueo NTLM del cliente SMB** (`BlockNTLM`, local y por directiva) y si el destino está en la lista de excepciones.
 7. **Restricción de NTLM saliente de LSA** (`RestrictSendingNTLMTraffic`) y sus excepciones.
 8. **Eventos NTLM hacia el destino.** Cruza los eventos **4015** (bloqueos) y **4020** (autenticaciones, con la versión negociada) de los últimos días. Distingue entre "bloqueado ahora" y "hubo bloqueos, pero ya hay una autenticación correcta posterior".
-9. **Sesión SMB activa.** Dialecto, usuario, firma y cifrado. Recuerda que una sesión ya abierta no vuelve a autenticarse, así que no sirve para probar un cambio.
+9. **Unidades de red y sesiones SMB con el destino.** Lista las unidades asignadas a ese servidor (`net use`) con su estado y falla si alguna se creó con `-BlockNTLM`, un bloqueo que afecta solo a esa asignación y que no aparece en la configuración global. Muestra las sesiones abiertas con dialecto, credencial, firma y cifrado, y si hay una credencial guardada para el servidor. Ten en cuenta dos cosas: Windows cierra las sesiones inactivas, así que es normal ver unidades conectadas y ninguna sesión hasta que abres la unidad; y una sesión ya abierta no vuelve a autenticarse, así que para probar un cambio hay que desconectar y volver a conectar. Desde una consola de administrador, las unidades asignadas sin elevar pueden no verse.
 
 Al final muestra un **resumen**, un **diagnóstico con la causa probable** y unos **siguientes pasos calculados según lo encontrado**.
 
@@ -70,7 +70,15 @@ Al final muestra un **resumen**, un **diagnóstico con la causa probable** y uno
 
 Por orden de preferencia:
 
-1. **Activar Credential Guard.** Es lo que recomienda Microsoft y el cambio de KB5066470 no se aplica cuando está activo. En `gpedit.msc` → *Plantillas administrativas* → *Sistema* → *Device Guard* → *Activar la seguridad basada en la virtualización*: **Habilitada**, nivel *Arranque seguro*, Credential Guard **Habilitado sin bloqueo UEFI**. La *protección de integridad de código* (HVCI) es independiente: si te da problemas con drivers o con el anti-cheat de algún juego, puedes dejarla deshabilitada y seguir teniendo Credential Guard.
+1. **Activar Credential Guard.** Es lo que recomienda Microsoft y el cambio de KB5066470 no se aplica cuando está activo. Se configura en `gpedit.msc` → *Configuración del equipo* → *Plantillas administrativas* → *Sistema* → *Device Guard* → *Activar la seguridad basada en la virtualización*.
+
+    ![Directiva Activar la seguridad basada en la virtualización, con Credential Guard habilitado](docs/img/gpo-credential-guard.png)
+
+    1. **Habilitada.**
+    2. **Configuración de Credential Guard: Habilitar sin bloqueo.** Es el ajuste que resuelve este problema. "Sin bloqueo" permite desactivarlo más adelante desde la propia directiva; "con bloqueo UEFI" lo fija en el firmware.
+    3. **Protección basada en la virtualización de la integridad de código.** Es fácil confundirla con la anterior, pero es otra función (HVCI o "integridad de memoria"): bloquea drivers que no cumplen sus requisitos y es la que suele chocar con drivers antiguos y con el anti-cheat de algunos juegos. No hace falta para este problema. Si el equipo no da problemas, déjala en *Habilitar sin bloqueo*, como en la captura; si los da, ponla en *Deshabilitado* y mantén Credential Guard.
+
+    En *Selecciona el nivel de seguridad de la plataforma*, *Arranque seguro* funciona en cualquier equipo con Secure Boot; *Arranque seguro y protección de DMA* añade protección frente a ataques por DMA si el hardware la admite.
 2. **`BlockNtlmv1SSO = 0`** en `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0`, solo si Credential Guard no es viable. Devuelve a **todo el equipo** el comportamiento anterior al endurecimiento y Microsoft lo plantea como temporal: documéntalo como decisión, no como solución.
 
 En ambos casos: reinicia, desconecta la unidad o sesión existente y vuelve a conectar para que se autentique de nuevo. Después vuelve a ejecutar el script.
@@ -97,6 +105,7 @@ Del lado del servidor, aprovecha para exigir **solo NTLMv2** y **SMB 2/3 como m�
 
 | Versión | Cambios |
 |---|---|
+| 1.1.0 | Paso 9 ampliado: unidades de red asignadas al destino con su estado, detección de asignaciones creadas con `-BlockNTLM`, credencial de la sesión y credenciales guardadas; explica por qué puede no haber sesión con unidades conectadas. Instrucciones de Credential Guard con los nombres exactos de la directiva y captura anotada. |
 | 1.0.0 | Versión inicial: petición y validación del destino (FQDN, IP o UNC), 9 comprobaciones, diagnóstico y siguientes pasos calculados, bilingüe (es/en), código de salida para RMM. |
 
 ## Licencia

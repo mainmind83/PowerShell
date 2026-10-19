@@ -1,6 +1,6 @@
 # NTLM Check
 
-**Test-NtlmHardening.ps1 · v1.0.0 · by [mainmind.com](https://mainmind.com)**
+**Test-NtlmHardening.ps1 · v1.1.0 · by [mainmind.com](https://mainmind.com)**
 
 [🇪🇸 Español](README.md) · 🇬🇧 English
 
@@ -62,7 +62,7 @@ Exit code: `0` when there are no failures and `1` otherwise, so it can run from 
 6. **SMB client NTLM blocking** (`BlockNTLM`, local and by policy) and whether the target is in the exception list.
 7. **LSA outgoing NTLM restriction** (`RestrictSendingNTLMTraffic`) and its exceptions.
 8. **NTLM events towards the target.** Correlates events **4015** (blocks) and **4020** (authentications, with the negotiated version) from the last few days. Tells "blocked now" apart from "there were blocks, but a later authentication succeeded".
-9. **Active SMB session.** Dialect, user, signing and encryption. It reminds you that an open session does not re-authenticate, so it cannot prove a change worked.
+9. **Network drives and SMB sessions with the target.** Lists the drives mapped to that server (`net use`) with their status and fails if any was created with `-BlockNTLM`, a block that applies to that mapping only and does not show in the global setting. Shows open sessions with dialect, credential, signing and encryption, and whether a credential is saved for the server. Two things to keep in mind: Windows closes idle sessions, so it is normal to see mapped drives and no session until you open the drive; and an open session does not re-authenticate, so to test a change you have to disconnect and reconnect. From an administrator console, drives mapped without elevation may not be visible.
 
 At the end it shows a **summary**, a **diagnosis with the likely cause** and **next steps computed from what it found**.
 
@@ -70,7 +70,15 @@ At the end it shows a **summary**, a **diagnosis with the likely cause** and **n
 
 In order of preference:
 
-1. **Enable Credential Guard.** This is Microsoft's recommendation, and the KB5066470 change does not apply while it runs. In `gpedit.msc` → *Administrative Templates* → *System* → *Device Guard* → *Turn On Virtualization Based Security*: **Enabled**, platform level *Secure Boot*, Credential Guard **Enabled without lock**. *Virtualization Based Protection of Code Integrity* (HVCI) is independent: if it causes trouble with drivers or a game's anti-cheat, you can leave it disabled and still have Credential Guard.
+1. **Enable Credential Guard.** This is Microsoft's recommendation, and the KB5066470 change does not apply while it runs. It is set in `gpedit.msc` → *Computer Configuration* → *Administrative Templates* → *System* → *Device Guard* → *Turn On Virtualization Based Security* (screenshot from a Spanish Windows).
+
+    ![Turn On Virtualization Based Security policy with Credential Guard enabled](docs/img/gpo-credential-guard.png)
+
+    1. **Enabled.**
+    2. **Credential Guard Configuration: Enabled without lock.** This is the setting that solves this problem. "Without lock" lets you turn it off later from the policy itself; "with UEFI lock" pins it in the firmware.
+    3. **Virtualization Based Protection of Code Integrity.** Easy to confuse with the previous one, but it is a different feature (HVCI or "memory integrity"): it blocks drivers that do not meet its requirements and is the one that usually clashes with old drivers and some games' anti-cheat. It is not needed for this problem. If the computer has no issues, leave it *Enabled without lock*, as in the screenshot; if it does, set it to *Disabled* and keep Credential Guard.
+
+    In *Select Platform Security Level*, *Secure Boot* works on any computer with Secure Boot; *Secure Boot and DMA Protection* adds protection against DMA attacks if the hardware supports it.
 2. **`BlockNtlmv1SSO = 0`** in `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0`, only if Credential Guard is not viable. It restores the pre-hardening behaviour for the **whole computer** and Microsoft frames it as temporary: document it as a decision, not as a fix.
 
 Either way: reboot, disconnect the existing drive or session and reconnect so it authenticates again. Then run the script again.
@@ -97,6 +105,7 @@ On the server side, take the chance to require **NTLMv2 only** and **SMB 2/3 as 
 
 | Version | Changes |
 |---|---|
+| 1.1.0 | Step 9 extended: network drives mapped to the target with their status, detection of mappings created with `-BlockNTLM`, session credential and saved credentials; explains why there may be no session while drives are connected. Credential Guard instructions with the exact policy names and an annotated screenshot. |
 | 1.0.0 | Initial release: target prompt and validation (FQDN, IP or UNC), 9 checks, computed diagnosis and next steps, bilingual (es/en), exit code for RMM use. |
 
 ## License
